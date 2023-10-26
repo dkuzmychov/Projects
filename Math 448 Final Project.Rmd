@@ -1,0 +1,602 @@
+---
+title: "MATH 448"
+author: "Danyl Kuzmychov"
+date: "Oct 22nd, 2021"
+output: pdf_document
+---
+
+
+Step 1;
+
+-- Look at data.
+
+```{r}
+library(dplyr)
+library(stringr)
+library(data.table)
+library(ggplot2)
+library(glmnet)
+library(pls)
+library(splines)
+library(gam)
+library(randomForest)
+
+data_start = read.csv("D:/448 Project Data/Enviroment_2/GlobalLandTemperaturesByState.csv")
+
+data_start1 = read.csv("D:/448 Project Data/Enviroment_2/GlobalTemperatures.csv")
+```
+
+
+Step 2;
+
+-- Process all California data.
+
+```{r}
+ls(data_start1)
+
+cali_temp = subset(data_start, data_start$State == "California")
+
+global_temp_1850 = data_start1[-c(1:1188,3166:3192),]
+
+cali_final_data = merge(cali_temp, global_temp_1850, by = "dt") # Cali Temp from 1850-2013
+
+cali_final_data = cali_final_data[-c(1,2,3,4,5,6,7,8,9,10,11,12),]
+
+cali_final_data$year <- substr(cali_final_data$dt,1,4)
+cali_final_data$month <- substr(cali_final_data$dt,6,7)
+
+y <- cali_final_data$AverageTemperature[4:nrow(cali_final_data)]
+year <- cali_final_data$year[4:nrow(cali_final_data)]
+month <- cali_final_data$month[4:nrow(cali_final_data)]
+lag1 <-  cali_final_data$AverageTemperature[3:(nrow(cali_final_data)-1)]
+lag2 <-  cali_final_data$AverageTemperature[2:(nrow(cali_final_data)-2)]
+lag3 <-  cali_final_data$AverageTemperature[1:(nrow(cali_final_data)-3)]
+aveTempSD <- cali_final_data$AverageTemperatureUncertainty[4:nrow(cali_final_data)]
+aveLandTemp <- cali_final_data$LandAverageTemperature[4:nrow(cali_final_data)]
+aveLandTempSD <- cali_final_data$LandAverageTemperatureUncertainty[4:nrow(cali_final_data)]
+
+data <- data.frame(y,year,month,lag1,lag2,lag3,aveTempSD,aveLandTemp,aveLandTempSD)
+data$month <- as.factor(data$month)
+data$year <- as.numeric(as.character(data$year))
+
+summary(data)
+```
+
+
+Goal; Try to narrow down the data by looking at the summers and winters of each year and trace their average from 1849 to 2013. 
+
+
+Modeling;
+
+-- Linear Model.
+
+```{r}
+row.number <- sample(1:nrow(data), 0.8*nrow(data))
+train_lm = data[row.number,]
+test_lm = data[-row.number,]
+
+lm_1 = lm(y ~ ., data = train_lm)
+lm.pred = predict(lm_1, newdata = test_lm)
+summary(lm_1)
+mean((lm.pred-test_lm$y)^2)
+
+#ggplot(train_lm, aes(y)) + geom_density(fill="blue")                             #bimodal
+```
+
+
+
+Subset selection; 
+
+-- Forward Step-wise and Backward Step-wise. 
+
+```{r}
+lm.all = lm(y ~ ., data = train_lm)                                #lm w/ all predictors
+summary(lm.all)
+
+lm.intercept = lm(y ~ 1, data = train_lm)                          #lm w/ only intercept
+summary(lm.intercept)
+
+forward_step = step(lm.intercept, direction = "forward", scope = formula(lm.all), trace = 0)     
+forward_step$anova
+forward_step$coefficients
+lm.pred1 = predict(forward_step, newdata = test_lm)
+mean((lm.pred1-test_lm$y)^2)                                                     
+
+
+backward_step = step(lm.all, direction = "backward", scope = formula(lm.all), trace = 0)    
+backward_step$anova
+backward_step$coefficients
+lm.pred2 = predict(backward_step, newdata = test_lm)
+mean((lm.pred2-test_lm$y)^2)                                                        
+```
+
+
+
+Regularization;
+
+-- Lasso Regression
+
+```{r}
+x_lasso = model.matrix(y ~ ., data = data)[,-1]        
+y_lasso = data$y
+dim(x_lasso)
+
+train_data = row.number
+test_data = (-train_data)
+y.test = y_lasso[test_data]
+grid = 10^seq(10,-2,length=100)
+
+lasso.mod = glmnet(x_lasso[train_data,],y_lasso[train_data], alpha=1, lambda=grid)
+plot(lasso.mod)                                                                        #coefficient plot
+
+set.seed(10)
+
+cv.out = cv.glmnet(x_lasso[train_data,],y_lasso[train_data], alpha=1)
+plot(cv.out)                                                                           #CV error plot
+
+bestlambda = cv.out$lambda.min
+bestlambda                                                                            #min cross validation error
+
+lasso.pred=predict(lasso.mod,s=bestlambda,newx=x_lasso[test_data,])
+mean((lasso.pred-y.test)^2)                                                            #test MSE = 1.342475           
+
+out = glmnet(x_lasso,y_lasso,alpha=1,lambda=grid)
+lasso.coef = predict(out,type="coefficients",s=bestlambda)
+lasso.coef
+```
+
+
+
+-- Ridge Regression
+
+```{r}
+x_ridge = model.matrix(y ~ ., data = data)[,-1]                                 
+y_ridge = data$y
+dim(x_ridge)
+
+train_data1 = row.number
+test_data1 = (-train_data1)
+y.test1 = y_ridge[test_data1]
+
+ridge.mod = glmnet(x_ridge,y_ridge,alpha=0,lambda=grid)
+plot(ridge.mod)                                                                    #coefficient plot
+
+set.seed(1)
+
+cv.out1 = cv.glmnet(x_ridge[train_data1,],y_ridge[train_data1],alpha=0)
+plot(cv.out1)                                                                      #CV error plot
+
+bestlam1=cv.out1$lambda.min
+bestlam1                                                                        #min cross validation error
+
+ridge.pred=predict(ridge.mod,s=bestlam1,newx=x_ridge[test_data1,])
+mean((ridge.pred-y.test1)^2)                                                     
+
+out1 = glmnet(x_ridge,y_ridge,alpha=0)
+predict(out1,type="coefficients",s=bestlam1)
+```
+
+
+
+
+Higher-Dimensional Analysis;
+
+-- PLS Regression
+
+```{r}
+x_pls = model.matrix(y ~ ., data = data)[,-1]
+y_pls = data$y
+
+train_pls = row.number
+test_pls = (-train_pls)
+y.test2 = y_pls[test_pls]
+
+set.seed(1)
+
+pls.fit=plsr(y ~ ., data = data, subset = train_pls, scale=TRUE, validation="CV")
+summary(pls.fit)                                                                        #50% of variation can be explained by 5 components
+coefficients(pls.fit)
+
+validationplot(pls.fit, val.type="MSEP")                                                #M = 9-18
+validationplot(pls.fit, val.type="R2") 
+
+pls.pred = predict(pls.fit, x_pls[test_pls,],ncomp=15)
+mean((pls.pred-y.test2)^2)                                                              
+```
+
+
+-- PCR Regression
+
+```{r}
+x_pcr = model.matrix(y ~ ., data = data)[,-1]
+y_pcr = data$y
+
+train_pcr = row.number
+test_pcr = (-train_pcr)
+y.test3 = y_pcr[test_pcr]
+
+set.seed(11)
+
+pcr.fit = pcr(y ~ ., data=data , subset = train_pcr, scale=TRUE, validation="CV")
+summary(pcr.fit)                                                                          #50% of variation can be explained by 4 components
+coefficients(pcr.fit)
+
+validationplot(pcr.fit, val.type="MSEP")                                                  #M = 15-18
+validationplot(pcr.fit, val.type="R2")
+
+pcr.pred = predict(pcr.fit,x_ridge[test_pcr,],ncomp=18)
+mean((pcr.pred-y.test3)^2)                                                                #test MSE = 1.41556 Lowest at M = 18
+```
+
+
+
+
+
+Random Forests;  !! REVIEW !!
+
+```{r}
+x_forests = model.matrix(y ~ ., data = data)[,-1]
+y_forests = data$y
+
+train_forests = row.number
+test_forests = (-train_forests)
+y.test4 = y_forests[-train_forests]
+
+set.seed(1)
+rf.data = randomForest(y ~ ., data=data, subset = train_forests, mtry=3, importance=TRUE)
+yhat.rf = predict(rf.data, newdata = data[-train_forests,])
+mean((yhat.rf-y.test4)^2)
+
+importance(rf.data)
+varImpPlot(rf.data)
+```
+
+
+
+
+GAM;  !! REVIEW !!
+
+```{r}
+gam1=lm(y ~ month + ns(lag1,5) + ns(lag2,5) + ns(lag3,5) + ns(aveLandTemp,5), data=train_lm)
+gam.pred = predict(gam1, newdata = test_lm)
+mean((gam.pred-test_lm$y)^2)
+
+
+summary(gam1)
+```
+
+
+
+
+Comparison of Methods;
+
+```{r}
+lm.mse = mean((lm.pred-test_lm$y)^2)                                            
+forward.mse = mean((lm.pred1-test_lm$y)^2)                                
+backward.mse = mean((lm.pred2-test_lm$y)^2)                              
+ridge.mse = mean((ridge.pred-y.test1)^2)
+lasso.mse = mean((lasso.pred-y.test)^2) 
+pcr.mse = mean((pcr.pred-y.test3)^2) 
+pls.mse = mean((pls.pred-y.test2)^2)
+forests.mse = mean((yhat.rf-y.test4)^2)
+gam.ns = mean((gam.pred-test_lm$y)^2)                                        
+all.mse = c(lm.mse, forward.mse, backward.mse, ridge.mse, lasso.mse, pcr.mse, pls.mse,forests.mse,gam.ns)
+names(all.mse) = c("lm", "forward", "backward" ,"ridge", "lasso", "pcr", "pls","Forests","GAM")
+barplot(all.mse,ylim = c(1.45,1.65))
+
+lm.mse
+forward.mse
+backward.mse
+ridge.mse
+lasso.mse
+pcr.mse
+pls.mse
+forests.mse
+gam.ns
+```
+
+
+
+
+FINAL MODEL;
+
+```{r}
+final_model = lm(y ~ month + lag1 + lag2 + aveLandTemp, data=data)
+summary(final_model)
+anova(final_model)
+
+mean(final_model$residuals^2)       #final mse
+
+res = resid(final_model)
+plot(fitted(final_model), res)
+abline(0,0)
+
+qqnorm(res)
+qqline(res)
+```
+
+
+
+
+
+Annual ave. temp by month;
+
+```{r}
+y1 <- data$y[10:nrow(data)]
+year1 <- data$year[10:nrow(data)]
+month1 <- data$month[10:nrow(data)]
+
+data2 <- data.frame(y1,year1,month1)
+data2$month1 <- as.factor(data2$month1)
+data2$year1 <- as.numeric(as.character(data2$year1))
+data2 = head(data2,-9)
+
+l1 = nrow(data2)
+
+l = l1/12
+
+origional = data2$y1
+p = 12
+new = NULL
+for (i in 1:l) {
+  ydata = origional[((i-1)*p+1):(i*p)]
+  yearlyAve = mean(ydata)
+  new = rbind(new, yearlyAve)
+}
+ave_y1 = new
+
+ts.plot(ave_y1)
+
+yrs = rep(1850+1:length(ave_y1))
+
+ave_y1 = noquote(cbind(yrs, ave_y1))
+
+plot(ave_y1, type = "l", main = "Yearly Average California Temp.", xlab = "Year", ylab = "Temperature")
+
+ave_y1
+
+temp_1951_c = 14.14358
+temp_2012_c = 15.35850
+
+temp_2012_c-temp_1951_c
+
+temp_1951_f = 57.458444
+temp_2012_f = 59.6453
+
+temp_2012_f-temp_1951_f
+```
+
+
+
+
+Visuals; 
+
+```{r}
+#-----------------------------------------------------------------------------------------------------------------------#
+
+plot(data_final$year, data_final$y, xlim = c(1849, 2015))     #Plot Cali Average Temp ~ year  ? Uniform Data?
+abline(0, 14.35696)
+
+plot(factor(data_final$month), data_final$y)                  #box-Plot Cali Average Temp ~ month
+
+plot(data_final$aveLandTemp, data_final$y)                    #Plot Cali Average Temp ~ average land temp  ? Not independent ?
+
+
+
+#---------------------------------data_final Data-----------------------------------------#
+
+hist(data$y, xlab = "Ave. California Temps", main = "Histogram of Ave. California Temps")           
+hist(data_final$aveLandTemp, xlab = "Ave. California land Temps", main = "Histogram of Ave. California land Temps")             
+hist(data_final$lag1)                                                         #Histogram LAG1
+hist(data_final$lag2)                                                         #Histogram LAG2
+hist(cali_final_data$LandAndOceanAverageTemperature, xlab = "Ave. California land and Ocean Temps", main = "Histogram of Ave. California land and ocean Temps")
+
+plot(data_final)                                              #Scatterplot data for all variables 
+
+summary(data_final)                                           #5 number summary for data
+
+summary(cali_final_data)
+
+
+#Plot Cali Average Temp ~ year
+ggplot(data, aes(x = year, y = y)) + 
+  geom_line() + 
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Average Temp ~ year", y = "Cali Average Temp", x = "Year")
+
+
+#Box-Plot Cali Average Temp ~ month
+ggplot(data, aes(x = factor(month), y = y)) +
+  geom_boxplot() +
+  geom_smooth(method = "loess") +
+  labs(title = "Cali Average Temp ~ month", y = "Cali Average Temp", x = "Month")
+
+
+#Plot Cali Average Land Temp ~ year
+ggplot(data, aes(x = year, y = aveLandTemp)) + 
+  geom_line() + 
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Average Land Temp ~ year", y = "Cali Average Land Temp", x = "Year")
+
+#Plot Cali Average Land and Water Temp ~ year
+#ggplot(cali_final_data, aes(x = year, y = LandAndOceanAverageTemperature)) + 
+  #geom_line() + 
+  #geom_smooth(method = "loess") +
+  #labs(title = " Cali Average Land and Water Temp ~ year", y = "Cali Average Land and Water Temp", x = "Year")
+
+
+#Box-Plot Cali Average Land Temp ~ month
+ggplot(data, aes(x = factor(month), y = aveLandTemp)) + 
+  geom_boxplot() +
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Average Land Temp ~ month", y = "Cali Average Land Temp", x = "Month")
+
+
+#Plot Cali Average Temp ~ year grouped by month
+ggplot(data, aes(x = year, y = y, group = as.numeric(month))) + 
+  geom_line(aes(colour = month)) +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Average Temp ~ year grouped by month", y = "Average California Temp", x = "Year")
+
+
+#Plot Cali Average Temp ~ month grouped by year
+ggplot(data, aes(x = factor(month), y = y, group = year)) + 
+  geom_line() +
+  scale_x_discrete(labels = month.abb[1:12]) +
+  labs(title = "Cali Average Temp ~ month grouped by year", y = "Average California Temp", x = "Months")
+
+
+#Plot Cali Average Temp ~ year grouped by month
+ggplot(data, aes(year, y, colour = as.numeric(month))) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Average Temp ~ year grouped by month", y = "Degrees Celsius") +
+  facet_wrap(~month) +
+  NULL
+
+#Plot Cali Average Land Temp ~ year grouped by month
+ggplot(data, aes(year, aveLandTemp, colour = as.numeric(month))) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Average Land Temp ~ year grouped by month", y = "Degrees Celsius") +
+  facet_wrap(~month) +
+  NULL
+
+#Plot Cali Average Land and Water Temp ~ year grouped by month
+ggplot(cali_final_data, aes(year, LandAndOceanAverageTemperature, colour = month)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Average Land and Water Temp ~ year grouped by month", y = "Degrees Celsius") +
+  facet_wrap(~month) +
+  NULL
+
+
+#---------------------------------cali_summer Data-----------------------------------------#
+
+#Plot Cali Summer Average Temp ~ year
+ggplot(cali_summer, aes(x = year, y = y, colour = month)) + 
+  geom_line() + 
+  geom_point() + 
+  geom_smooth(method = "loess") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Summer Average Temp (June, July, Aug.) ~ year", y = "Cali Summer Average Temp", x = "Year")
+
+
+#Box-Plot Cali Summer Average Temp ~ month
+ggplot(cali_summer, aes(x = factor(month), y = y)) + 
+  geom_boxplot() + 
+  geom_smooth(method = "loess") +
+  labs(title = "Cali Summer Average Temp (June, July, Aug.) ~ month", y = "Cali Summer Average Temp", x = "Month")
+
+
+#Plot Cali Summer Average Land Temp ~ year
+ggplot(cali_summer, aes(x = year, y = aveLandTemp)) + 
+  geom_line() + 
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Summer Average Land Temp ~ year", y = "Cali Summer Average Land Temp", x = "Year")
+
+
+#Box-Plot Cali Summer Average Land Temp ~ month
+ggplot(cali_summer, aes(x = factor(month), y = aveLandTemp)) + 
+  geom_boxplot() +
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Summer Average Land Temp ~ month", y = "Cali Summer Average Land Temp", x = "Month")
+
+
+#Plot Cali Summer Average Temp ~ year grouped by month 
+ggplot(cali_summer, aes(year, y, colour = month)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Summer Cali Average Temp ~ year grouped by month", y = "Degrees Celsius") +
+  facet_wrap(~month) +
+  NULL
+
+
+#---------------------------------cali_winter Data-----------------------------------------#
+
+#Plot Cali Winter Average Temp ~ year
+ggplot(cali_winter, aes(x = year, y = y, colour = month)) + 
+  geom_line() + 
+  geom_point() + 
+  geom_smooth(method = "loess") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Cali Winter Average Temp (Dec, Jan, Feb.) ~ year", y = "Cali Winter Average Temp", x = "Year")
+
+
+#Box-Plot Cali Winter Average Temp ~ month
+ggplot(cali_winter, aes(x = factor(month), y = y)) + 
+  geom_boxplot() + 
+  geom_smooth(method = "loess") +
+  labs(title = "Cali Winter Average Temp (Dec, Jan, Feb.) ~ month", y = "Cali Winter Average Temp", x = "Month")
+
+
+#Plot Cali Winter Average Land Temp ~ year
+ggplot(cali_winter, aes(x = year, y = aveLandTemp)) + 
+  geom_line() + 
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Winter Average Land Temp ~ year", y = "Cali Winter Average Land Temp", x = "Year")
+
+
+#Box-Plot Cali Winter Average Land Temp ~ month
+ggplot(cali_winter, aes(x = factor(month), y = aveLandTemp)) + 
+  geom_boxplot() +
+  geom_smooth(method = "loess") +
+  labs(title = " Cali Winter Average Land Temp ~ month", y = "Cali Winter Average Land Temp", x = "Month")
+
+#Plot Cali Winter Average Temp ~ year grouped by month 
+ggplot(cali_winter, aes(year, y, colour = month)) +
+  geom_point(size = 0.5) +
+  geom_smooth(method = "loess") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+        axis.title.x = element_blank(),
+        legend.position = "none") +
+  scale_color_gradient(low="blue", high="red") +
+  labs(title = "Winter Cali Average Temp ~ year grouped by month", y = "Degrees Celsius") +
+  facet_wrap(~month) +
+  NULL
+
+
+#---------------------------------Not Using-----------------------------------------#
+#Plot Cali Average Temp ~ year
+#ggplot(cali_final_data, aes(x = dt, y = AverageTemperature, group = 1)) + 
+ # geom_line() + 
+  #geom_smooth(method = "loess")
+
+#Plot Cali Average Temp ~ all months of June
+#ggplot(june, aes(x = year, y = y)) + 
+  #geom_line() + 
+  #geom_point() + 
+  #geom_smooth(method = "loess")    
+
+#Plot Cali Average Temp ~ all months of July
+#ggplot(july, aes(x = year, y = y)) + 
+  #geom_line() + 
+  #geom_point() + 
+  #geom_smooth(method = "loess")   
+
+#Plot Cali Average Temp ~ all months of Aug.
+#ggplot(aug, aes(x = year, y = y)) + 
+  #geom_line() + 
+  #geom_point() + 
+  #geom_smooth(method = "loess")      
+```
+
+
+
+
